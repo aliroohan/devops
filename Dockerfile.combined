@@ -1,0 +1,60 @@
+# Stage 1: Build Frontend
+FROM node:20-alpine AS frontend-build
+WORKDIR /app/frontend
+
+COPY frontend/package*.json ./
+RUN npm install
+
+COPY frontend/ .
+# Let Vita know that APIs are accessible relatively
+ARG VITE_API_URL=/api
+ENV VITE_API_URL=$VITE_API_URL
+RUN npm run build
+
+
+# Stage 2: Final Combined Image (Node + Nginx)
+FROM node:20-alpine
+
+# Install Nginx
+RUN apk add --no-cache nginx openrc
+
+# Create Nginx configuration
+# This serves the frontend on port 80 and proxies /api requests to the Node.js backend
+RUN mkdir -p /etc/nginx/http.d && \
+    echo 'server {' > /etc/nginx/http.d/default.conf && \
+    echo '    listen 80;' >> /etc/nginx/http.d/default.conf && \
+    echo '    server_name localhost;' >> /etc/nginx/http.d/default.conf && \
+    echo '    location / {' >> /etc/nginx/http.d/default.conf && \
+    echo '        root /usr/share/nginx/html;' >> /etc/nginx/http.d/default.conf && \
+    echo '        index index.html index.htm;' >> /etc/nginx/http.d/default.conf && \
+    echo '        try_files $uri $uri/ /index.html;' >> /etc/nginx/http.d/default.conf && \
+    echo '    }' >> /etc/nginx/http.d/default.conf && \
+    echo '    location /api/ {' >> /etc/nginx/http.d/default.conf && \
+    echo '        proxy_pass http://localhost:5000/api/;' >> /etc/nginx/http.d/default.conf && \
+    echo '        proxy_set_header Host $host;' >> /etc/nginx/http.d/default.conf && \
+    echo '        proxy_set_header X-Real-IP $remote_addr;' >> /etc/nginx/http.d/default.conf && \
+    echo '    }' >> /etc/nginx/http.d/default.conf && \
+    echo '}' >> /etc/nginx/http.d/default.conf
+
+WORKDIR /app
+
+# Setup Backend
+COPY backend/package*.json ./backend/
+RUN cd backend && npm install --production
+
+COPY backend/ ./backend/
+
+# Copy Frontend build to Nginx serving directory
+COPY --from=frontend-build /app/frontend/dist /usr/share/nginx/html
+
+# Create a startup script to run both Node.js Backend and Nginx Frontend
+RUN echo '#!/bin/sh' > /start.sh && \
+    echo '# Start the backend in the background' >> /start.sh && \
+    echo 'cd /app/backend && npm start & ' >> /start.sh && \
+    echo '# Start Nginx in the foreground' >> /start.sh && \
+    echo 'nginx -g "daemon off;"' >> /start.sh && \
+    chmod +x /start.sh
+
+EXPOSE 80
+
+CMD ["/start.sh"]

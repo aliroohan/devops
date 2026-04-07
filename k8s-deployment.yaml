@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: expense-tracker
+---
+# 1. MongoDB Database
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: expense-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+      - name: mongodb
+        image: mongo:latest
+        ports:
+        - containerPort: 27017
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: expense-tracker
+spec:
+  ports:
+  - port: 27017
+  selector:
+    app: mongodb
+---
+# 2. Combined App (Frontend + Backend)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: expense-tracker-app
+  namespace: expense-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: expense-tracker-app
+  template:
+    metadata:
+      labels:
+        app: expense-tracker-app
+    spec:
+      containers:
+      - name: app
+        image: aliroohan/expense-tracker-app:latest
+        env:
+        - name: MONGODB_URI
+          value: "mongodb://mongodb:27017/expense-tracker"
+        - name: JWT_SECRET
+          value: "expense_tracker_jwt_secret_key_2026"
+        - name: JWT_EXPIRE
+          value: "7d"
+        # Only port 80 needs to be exposed since Nginx handles the routing internally
+        ports:
+        - containerPort: 80
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: expense-tracker-app
+  namespace: expense-tracker
+spec:
+  type: LoadBalancer # This provisions a Public IP
+  ports:
+  - port: 80
+    targetPort: 80
+  selector:
+    app: expense-tracker-app
