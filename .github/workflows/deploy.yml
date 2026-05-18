@@ -5,7 +5,6 @@
 #   AKS_CLUSTER_NAME              Azure AKS cluster name
 #   AKS_RESOURCE_GROUP            Resource group containing the cluster
 #
-# The cluster principal must allow get-credentials / deploy (e.g. Azure Kubernetes Service Cluster User Role).
 
 name: CI — build, test, push, deploy AKS
 
