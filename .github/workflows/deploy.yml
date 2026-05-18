@@ -8,10 +8,7 @@
 #   AKS_CLUSTER_NAME              AKS cluster name
 #   AKS_RESOURCE_GROUP            Resource group containing the cluster
 #
-# Azure login expects a JSON object with keys exactly: clientId, clientSecret, subscriptionId, tenantId
-# (camelCase). A single AZURE_CREDENTIALS blob often fails if keys are wrong or the JSON is truncated.
-# This workflow builds that JSON from four secrets (see Azure/login README).
-#
+# Azure auth uses AZURE_* secrets below with `az login --subscription` (see Azure CLI deploy step).
 # The service principal needs rights to fetch AKS kubeconfig (e.g. Azure Kubernetes Service Cluster User Role).
 
 name: CI — build, test, push, deploy AKS
@@ -87,10 +84,24 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/expense-tracker-app:${{ github.sha }}
 
       # --- Deploy to AKS (apply manifest with substituted image — repo file untouched) ---
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+      # Use `az login --subscription` instead of azure/login: some SPs hit "No subscriptions found" during
+      # subscription enumeration even with valid IAM; pinning the subscription avoids that.
+      # Still required: role on this subscription or RG (e.g. Contributor) for the same app registration.
+      - name: Azure CLI login (service principal + subscription pin)
+        run: |
+          set -euo pipefail
+          az login \
+            --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" \
+            --tenant "$AZURE_TENANT_ID" \
+            --subscription "$AZURE_SUBSCRIPTION_ID"
+          az account show --output table
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Set up kubectl
         uses: azure/setup-kubectl@v4
