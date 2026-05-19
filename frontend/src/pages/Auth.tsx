@@ -29,7 +29,7 @@ export const Login = () => {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-950 px-4">
       <div className="max-w-md w-full p-8 rounded-2xl bg-slate-900 border border-white/10 shadow-2xl">
-        <h2 className="text-3xl font-extrabold text-black text-center mb-2">Login</h2>
+        <h2 className="text-3xl font-extrabold text-white text-center mb-2">Login</h2>
         <p className="text-slate-400 text-center mb-8">Access your expense tracker</p>
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="space-y-1">
