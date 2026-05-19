@@ -1,135 +1,167 @@
-name: DevOps CI/CD Pipeline
+# Required GitHub Secrets (Repository -> Settings -> Secrets and variables -> Actions):
+#   DOCKERHUB_USERNAME            Docker Hub username
+#   DOCKERHUB_TOKEN               Docker Hub access token (recommended) or password
+#   AZURE_CLIENT_ID               App registration / service principal Application (client) ID
+#   AZURE_CLIENT_SECRET           Service principal client secret (value, not "Secret ID")
+#   AZURE_SUBSCRIPTION_ID         Azure subscription ID
+#   AZURE_TENANT_ID               Microsoft Entra tenant (directory) ID
+#   AKS_CLUSTER_NAME              AKS cluster name
+#   AKS_RESOURCE_GROUP            Resource group containing the cluster
+#
+# Azure login expects a JSON object with keys exactly: clientId, clientSecret, subscriptionId, tenantId
+# (camelCase). A single AZURE_CREDENTIALS blob often fails if keys are wrong or the JSON is truncated.
+# This workflow builds that JSON from four secrets (see azure/login README).
+#
+# Azure auth uses AZURE_* secrets below with `az login --subscription` (see Azure CLI deploy step).
+# The service principal needs rights to fetch AKS kubeconfig (e.g. Azure Kubernetes Service Cluster User Role).
+
+name: CI - build, test, push, deploy AKS
 
 on:
   push:
-    branches: [ main, master, dev ]
-  pull_request:
-    branches: [ main, master, dev ]
+    branches:
+      - main
+      - master
+  workflow_dispatch:
 
-env:
-  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-  IMAGE_FRONTEND: ${{ secrets.DOCKER_USERNAME }}/devops-frontend
-  IMAGE_BACKEND: ${{ secrets.DOCKER_USERNAME }}/devops-backend
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # ─────────────────────────────────────────
-  # STAGE 1: Build
-  # ─────────────────────────────────────────
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+      - name: Setup Node.js (frontend)
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: Install Frontend Dependencies
-        working-directory: ./frontend
-        run: npm install
+      - name: Install & build frontend (compile + bundle)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
 
-      - name: Build Frontend
-        working-directory: ./frontend
-        run: npm run build --if-present
+      - name: Setup Node.js (backend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
 
-      - name: Install Backend Dependencies
-        working-directory: ./backend
-        run: npm install
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
 
-  # ─────────────────────────────────────────
-  # STAGE 2: Test
-  # ─────────────────────────────────────────
   test:
-    name: Automated Tests
+    name: Test
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+      - name: Setup Node.js (backend)
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
 
-      - name: Install Backend Dependencies
-        working-directory: ./backend
-        run: npm install
+      - name: Install backend & syntax check
+        working-directory: backend
+        run: |
+          npm ci
+          node --check src/server.js
 
-      - name: Run Backend Tests
-        working-directory: ./backend
-        run: npm test --if-present || echo "No tests found, skipping"
-
-      - name: Install Frontend Dependencies
-        working-directory: ./frontend
-        run: npm install
-
-      - name: Run Frontend Tests
-        working-directory: ./frontend
-        run: npm test -- --watchAll=false --passWithNoTests || echo "No tests found, skipping"
-
-  # ─────────────────────────────────────────
-  # STAGE 3: Docker Build & Push
-  # ─────────────────────────────────────────
   docker:
     name: Docker Build & Push
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push'
+    env:
+      # Single image referenced by k8s for expense-tracker-app (see k8s-deployment.yaml)
+      DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/expense-tracker-app:latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push Frontend Image
-        uses: docker/build-push-action@v4
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
         with:
-          context: ./frontend
+          context: .
+          file: Dockerfile.combined
           push: true
-          tags: ${{ env.IMAGE_FRONTEND }}:latest
+          tags: |
+            ${{ env.DOCKER_IMAGE }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/expense-tracker-app:${{ github.sha }}
 
-      - name: Build & Push Backend Image
-        uses: docker/build-push-action@v4
-        with:
-          context: ./backend
-          push: true
-          tags: ${{ env.IMAGE_BACKEND }}:latest
-
-  # ─────────────────────────────────────────
-  # STAGE 4: Deploy to AKS
-  # ─────────────────────────────────────────
   deploy:
     name: Deploy to AKS
     runs-on: ubuntu-latest
     needs: docker
-    if: github.event_name == 'push'
+    env:
+      DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/expense-tracker-app:latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      # --- Deploy to AKS (apply manifest with substituted image - repo file untouched) ---
       - name: Azure Login
-        uses: azure/login@v1
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
 
-      - name: Set AKS Context
-        uses: azure/aks-set-context@v3
+      # Use `az login --subscription` instead of azure/login: some SPs hit "No subscriptions found" during
+      # subscription enumeration even with valid IAM; pinning the subscription avoids that.
+      # Still required: role on this subscription or RG (e.g. Contributor) for the same app registration.
+      - name: Azure CLI login (service principal + subscription pin)
+        run: |
+          set -euo pipefail
+          az login \
+            --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" \
+            --tenant "$AZURE_TENANT_ID" \
+            --subscription "$AZURE_SUBSCRIPTION_ID"
+          az account show --output table
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
         with:
           resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
           cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
 
-      - name: Deploy to AKS
+      - name: kubectl apply with CI image reference
         run: |
-          kubectl apply -f k8s-deployment.yaml
-          kubectl rollout restart deployment/frontend-deployment
-          kubectl rollout restart deployment/backend-deployment
-          kubectl rollout status deployment/frontend-deployment
-          kubectl rollout status deployment/backend-deployment
+          set -euo pipefail
+          # Replace deployed image so it matches Docker Hub account in secrets (committed yaml may use another username).
+          sed "s|image:.*expense-tracker-app:.*|image: ${DOCKER_IMAGE}|" k8s-deployment.yaml | kubectl apply -f -
+
+      - name: Rollout restart (pick up new :latest digest)
+        run: |
+          kubectl rollout restart deployment/expense-tracker-app -n expense-tracker
+          kubectl rollout status deployment/expense-tracker-app -n expense-tracker --timeout=300s
